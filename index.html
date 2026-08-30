@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#171816" />
+    <meta name="description" content="Play a private, local game against the Warhorse Rust chess engine." />
+    <title>Warhorse Chess</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="Warhorse home">
+          <span class="brand-mark">W</span>
+          <span>Warhorse</span>
+        </a>
+        <div class="runtime-badge"><span></span> Rust engine · local</div>
+      </header>
+
+      <main class="game-layout">
+        <section class="board-column" aria-label="Chess game">
+          <div class="player-row opponent-row">
+            <div class="player-avatar dark">W</div>
+            <div><strong>Warhorse</strong><span>Rust engine</span></div>
+            <div id="enginePulse" class="thinking-pulse" hidden><i></i><i></i><i></i></div>
+          </div>
+
+          <div class="board-frame">
+            <div id="board" class="board" role="grid" aria-label="Chessboard"></div>
+          </div>
+
+          <div class="player-row">
+            <div class="player-avatar light">Y</div>
+            <div><strong>You</strong><span>White</span></div>
+          </div>
+        </section>
+
+        <aside class="game-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">CURRENT GAME</p>
+            <h1>Play Warhorse</h1>
+            <p id="statusText" class="status-text" aria-live="polite">Loading engine…</p>
+          </div>
+
+          <div class="engine-card">
+            <div>
+              <span class="engine-label">Engine</span>
+              <strong>Warhorse 1.0</strong>
+            </div>
+            <span class="engine-chip">WASM</span>
+          </div>
+
+          <div class="history-section">
+            <div class="section-title">
+              <h2>Moves</h2>
+              <span id="moveCount">0 moves</span>
+            </div>
+            <div id="moveHistory" class="move-history">
+              <p class="history-empty">Your game will appear here.</p>
+            </div>
+          </div>
+
+          <div class="settings-row">
+            <label for="thinkTime">Engine time</label>
+            <select id="thinkTime">
+              <option value="250">Quick · 0.25s</option>
+              <option value="650" selected>Standard · 0.65s</option>
+              <option value="1200">Strong · 1.2s</option>
+              <option value="2500">Deep · 2.5s</option>
+            </select>
+          </div>
+
+          <div class="actions">
+            <button id="newGame" class="primary-action" type="button">New game</button>
+            <button id="flipBoard" class="secondary-action" type="button" aria-label="Flip board">Flip board</button>
+          </div>
+          <p class="privacy-note">Runs entirely in your browser. No game data leaves this device.</p>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="promotionDialog" class="promotion-dialog">
+      <form method="dialog">
+        <p>Promote pawn to</p>
+        <div id="promotionChoices" class="promotion-choices"></div>
+        <button class="cancel-promotion" value="cancel">Cancel</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="/web/main.js"></script>
+  </body>
+</html>

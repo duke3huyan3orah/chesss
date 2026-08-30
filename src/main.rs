@@ -343,6 +343,74 @@ impl Position {
         }
     }
 
+    fn to_fen(&self) -> String {
+        let mut board = String::new();
+        for r in (0..8).rev() {
+            let mut empty = 0;
+            for f in 0..8 {
+                let piece = self.board[r * 8 + f];
+                if piece == EMPTY {
+                    empty += 1;
+                    continue;
+                }
+                if empty > 0 {
+                    board.push(char::from_digit(empty, 10).unwrap());
+                    empty = 0;
+                }
+                let symbol = match kind(piece) {
+                    PAWN => 'p',
+                    KNIGHT => 'n',
+                    BISHOP => 'b',
+                    ROOK => 'r',
+                    QUEEN => 'q',
+                    KING => 'k',
+                    _ => unreachable!(),
+                };
+                board.push(if piece > 0 {
+                    symbol.to_ascii_uppercase()
+                } else {
+                    symbol
+                });
+            }
+            if empty > 0 {
+                board.push(char::from_digit(empty, 10).unwrap());
+            }
+            if r > 0 {
+                board.push('/');
+            }
+        }
+        let mut rights = String::new();
+        if self.castle & 1 != 0 {
+            rights.push('K');
+        }
+        if self.castle & 2 != 0 {
+            rights.push('Q');
+        }
+        if self.castle & 4 != 0 {
+            rights.push('k');
+        }
+        if self.castle & 8 != 0 {
+            rights.push('q');
+        }
+        if rights.is_empty() {
+            rights.push('-');
+        }
+        let ep = if self.ep >= 0 {
+            square_name(self.ep as u8)
+        } else {
+            "-".into()
+        };
+        format!(
+            "{} {} {} {} {} {}",
+            board,
+            if self.side == WHITE { "w" } else { "b" },
+            rights,
+            ep,
+            self.halfmove,
+            self.fullmove
+        )
+    }
+
     #[inline(always)]
     fn king_of(&self, side: i8) -> u8 {
         self.king_sq[if side == WHITE { 0 } else { 1 }]
@@ -917,11 +985,17 @@ fn parse_square(s: &str) -> Option<u8> {
     Some((b[1] - b'1') * 8 + b[0] - b'a')
 }
 
+fn square_name(sq: u8) -> String {
+    let mut result = String::with_capacity(2);
+    result.push((b'a' + sq % 8) as char);
+    result.push((b'1' + sq / 8) as char);
+    result
+}
+
 fn move_to_uci(mv: u32) -> String {
     let mut s = String::with_capacity(5);
     for sq in [move_from(mv), move_to(mv)] {
-        s.push((b'a' + sq % 8) as char);
-        s.push((b'1' + sq / 8) as char);
+        s.push_str(&square_name(sq));
     }
     if mv & FLAG_PROMO != 0 {
         s.push(match move_promo(mv) {
@@ -1458,6 +1532,7 @@ fn see(pos: &Position, mv: u32) -> i32 {
 struct Searcher {
     tt: TransTable,
     own_book: bool,
+    silent: bool,
     stop: Arc<AtomicBool>,
     started: Instant,
     soft_limit: Option<Duration>,
@@ -1479,6 +1554,7 @@ impl Searcher {
         Self {
             tt: TransTable::new(hash_mb),
             own_book: true,
+            silent: false,
             stop,
             started: Instant::now(),
             soft_limit: None,
@@ -1948,7 +2024,9 @@ impl Searcher {
             && let Some(book) = opening_move(pos)
         {
             if (0..legal.len).any(|i| legal.moves[i] == book) {
-                println!("info string book {}", move_to_uci(book));
+                if !self.silent {
+                    println!("info string book {}", move_to_uci(book));
+                }
                 return book;
             }
         }
@@ -1986,28 +2064,30 @@ impl Searcher {
             } else {
                 self.nodes
             };
-            let score_text = if score.abs() > MATE - MAX_PLY as i32 {
-                format!(
-                    "score mate {}",
-                    if score > 0 {
-                        (MATE - score + 1) / 2
-                    } else {
-                        -(MATE + score) / 2
-                    }
-                )
-            } else {
-                format!("score cp {}", score)
-            };
-            println!(
-                "info depth {} seldepth {} {} nodes {} nps {} time {} pv {}",
-                depth,
-                self.seldepth,
-                score_text,
-                self.nodes,
-                nps,
-                elapsed.as_millis(),
-                move_to_uci(best)
-            );
+            if !self.silent {
+                let score_text = if score.abs() > MATE - MAX_PLY as i32 {
+                    format!(
+                        "score mate {}",
+                        if score > 0 {
+                            (MATE - score + 1) / 2
+                        } else {
+                            -(MATE + score) / 2
+                        }
+                    )
+                } else {
+                    format!("score cp {}", score)
+                };
+                println!(
+                    "info depth {} seldepth {} {} nodes {} nps {} time {} pv {}",
+                    depth,
+                    self.seldepth,
+                    score_text,
+                    self.nodes,
+                    nps,
+                    elapsed.as_millis(),
+                    move_to_uci(best)
+                );
+            }
             if score.abs() > MATE - 100
                 || limits
                     .soft
@@ -2385,6 +2465,125 @@ fn run_selfplay(depth: i32, max_plies: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn web_position(serialized_moves: &str) -> Result<(Position, Vec<u64>), String> {
+    let mut pos = Position::from_fen(START_FEN)?;
+    let mut history = vec![pos.hash];
+    if serialized_moves != "-" && !serialized_moves.is_empty() {
+        for text in serialized_moves.split(',') {
+            let mv = parse_uci_move(&mut pos, text)
+                .ok_or_else(|| format!("illegal move in history: {text}"))?;
+            pos.make_move(mv);
+            history.push(pos.hash);
+        }
+    }
+    Ok((pos, history))
+}
+
+fn web_threefold(history: &[u64], current: u64) -> bool {
+    history.iter().filter(|&&hash| hash == current).count() >= 3
+}
+
+fn web_snapshot(pos: &mut Position, history: &[u64], engine_move: Option<u32>) -> String {
+    let in_check = pos.in_check(pos.side);
+    let mut legal = MoveList::new();
+    generate_legal(pos, &mut legal, false);
+    let status = if legal.len == 0 {
+        if in_check { "checkmate" } else { "stalemate" }
+    } else if pos.halfmove >= 100 || insufficient_material(pos) || web_threefold(history, pos.hash)
+    {
+        "draw"
+    } else if in_check {
+        "check"
+    } else {
+        "playing"
+    };
+    let moves = if matches!(status, "checkmate" | "stalemate" | "draw") {
+        String::new()
+    } else {
+        (0..legal.len)
+            .map(|i| format!("\"{}\"", move_to_uci(legal.moves[i])))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let engine = engine_move
+        .map(|mv| format!("\"{}\"", move_to_uci(mv)))
+        .unwrap_or_else(|| "null".into());
+    format!(
+        "{{\"ok\":true,\"fen\":\"{}\",\"side\":\"{}\",\"status\":\"{}\",\"inCheck\":{},\"legal\":[{}],\"engineMove\":{}}}",
+        pos.to_fen(),
+        if pos.side == WHITE { "w" } else { "b" },
+        status,
+        in_check,
+        moves,
+        engine
+    )
+}
+
+fn web_error(message: &str) -> String {
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{{\"ok\":false,\"error\":\"{escaped}\"}}")
+}
+
+fn run_web(args: &[String]) -> Result<(), String> {
+    let result = (|| -> Result<String, String> {
+        let action = args
+            .first()
+            .map(String::as_str)
+            .ok_or("missing web action")?;
+        let moves = args.get(1).map(String::as_str).unwrap_or("-");
+        let (mut pos, mut history) = web_position(moves)?;
+        match action {
+            "state" => Ok(web_snapshot(&mut pos, &history, None)),
+            "play" => {
+                let text = args.get(2).ok_or("missing player move")?;
+                let mv = parse_uci_move(&mut pos, text).ok_or("illegal player move")?;
+                pos.make_move(mv);
+                history.push(pos.hash);
+                Ok(web_snapshot(&mut pos, &history, None))
+            }
+            "engine" => {
+                let mut legal = MoveList::new();
+                generate_legal(&mut pos, &mut legal, false);
+                if legal.len == 0
+                    || pos.halfmove >= 100
+                    || insufficient_material(&pos)
+                    || web_threefold(&history, pos.hash)
+                {
+                    return Ok(web_snapshot(&mut pos, &history, None));
+                }
+                let think_ms = args
+                    .get(2)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(650)
+                    .clamp(25, 5_000);
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut searcher = Searcher::new(32, stop);
+                searcher.silent = true;
+                let hard_ms = think_ms.saturating_sub(4).max(1);
+                let best = searcher.search(
+                    &mut pos,
+                    GoLimits {
+                        depth: 64,
+                        soft: Some(Duration::from_millis(hard_ms * 9 / 10)),
+                        hard: Some(Duration::from_millis(hard_ms)),
+                        nodes: None,
+                    },
+                    &history,
+                );
+                if !(0..legal.len).any(|i| legal.moves[i] == best) {
+                    return Err("engine returned an illegal move".into());
+                }
+                pos.make_move(best);
+                history.push(pos.hash);
+                Ok(web_snapshot(&mut pos, &history, Some(best)))
+            }
+            _ => Err("unknown web action".into()),
+        }
+    })();
+    println!("{}", result.unwrap_or_else(|error| web_error(&error)));
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn uci_loop() -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -2536,6 +2735,7 @@ fn main() {
             args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5),
             args.get(3).and_then(|s| s.parse().ok()).unwrap_or(80),
         ),
+        Some("web") => run_web(&args[2..]),
         _ => uci_loop(),
     };
     if let Err(error) = result {

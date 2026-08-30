@@ -1,11 +1,15 @@
 'use strict';
 
-const childProcess = require('node:child_process');
-const path = require('node:path');
+import childProcess from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 if (process.argv[2] === '--worker') {
-  const fs = require('node:fs');
-  const { WASI } = require('node:wasi');
+  const fs = await import('node:fs');
+  const { WASI } = await import('node:wasi');
   const wasi = new WASI({
     version: 'preview1',
     args: ['warhorse', ...process.argv.slice(3)],
@@ -29,12 +33,13 @@ if (process.argv[2] === '--worker') {
   );
   child.on('exit', (code) => process.exit(code ?? 1));
 } else {
-  const readline = require('node:readline');
+  const readline = await import('node:readline');
   let engine;
   let restarting = false;
   let searching = false;
   let stopRequested = false;
   let stopTimer = null;
+  let infiniteSearch = false;
   let latestMove = null;
   let outputBuffer = '';
   let lastPosition = 'position startpos';
@@ -105,6 +110,7 @@ if (process.argv[2] === '--worker') {
     if (command.startsWith('go')) {
       searching = true;
       stopRequested = false;
+      infiniteSearch = command.split(/\s+/).includes('infinite');
       latestMove = null;
     }
     if (command === 'stop' && searching) {
@@ -117,8 +123,13 @@ if (process.argv[2] === '--worker') {
     }
     if (command === 'quit') {
       restarting = false;
-      engine.kill();
-      process.exit(0);
+      if (infiniteSearch && searching) engine.kill();
+      else {
+        engine.stdin.end('quit\n');
+        setTimeout(() => engine.kill(), 2_000).unref();
+      }
+      process.stdin.pause();
+      engine.once('exit', () => process.exit(0));
       return;
     }
     if (restarting) {

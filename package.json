@@ -1,0 +1,21 @@
+{
+  "name": "warhorse-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "build:engine": "node scripts/build-engine.js",
+    "test:web": "node scripts/web-smoke.mjs",
+    "verify": "cargo test --release && npm run build:engine && npm run build"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2"
+  },
+  "devDependencies": {
+    "playwright-core": "1.62.1",
+    "vite": "7.3.6"
+  }
+}

@@ -1,7 +1,7 @@
 'use strict';
 
-const fs = require('node:fs');
-const { WASI } = require('node:wasi');
+import fs from 'node:fs';
+import { WASI } from 'node:wasi';
 
 const wasmPath = process.argv[2];
 const wasi = new WASI({
