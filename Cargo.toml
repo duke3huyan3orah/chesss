@@ -1,0 +1,14 @@
+[package]
+name = "warhorse"
+version = "1.0.0"
+edition = "2024"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[[bin]]
+name = "warhorse"
+path = "src/main.rs"
