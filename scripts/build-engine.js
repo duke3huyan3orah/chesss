@@ -6,7 +6,7 @@ const localCargo = process.platform === 'win32'
   ? join(process.env.USERPROFILE || '', '.cargo', 'bin', 'cargo.exe')
   : join(process.env.HOME || '', '.cargo', 'bin', 'cargo');
 const cargo = process.env.CARGO || (existsSync(localCargo) ? localCargo : 'cargo');
-const build = spawnSync(cargo, ['build', '--release'], { stdio: 'inherit' });
+const build = spawnSync(cargo, ['build', '--release', '--target', 'wasm32-wasip1'], { stdio: 'inherit' });
 
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);

@@ -182,8 +182,8 @@ struct Undo {
 impl Position {
     fn from_fen(fen: &str) -> Result<Self, String> {
         let fields: Vec<&str> = fen.split_whitespace().collect();
-        if fields.len() < 4 {
-            return Err("FEN requires at least four fields".into());
+        if fields.len() != 6 {
+            return Err("FEN requires exactly six fields".into());
         }
         let mut board = [EMPTY; 64];
         let mut r = 7i8;
@@ -292,13 +292,26 @@ impl Position {
         if king_count != [1, 1] {
             return Err("FEN must contain exactly one king per side".into());
         }
+        for (right, king, king_home, rook, rook_home) in [
+            (1, KING, 4, ROOK, 7),
+            (2, KING, 4, ROOK, 0),
+            (4, -KING, 60, -ROOK, 63),
+            (8, -KING, 60, -ROOK, 56),
+        ] {
+            if castle & right != 0 && (board[king_home] != king || board[rook_home] != rook) {
+                return Err("castling right requires king and rook on home squares".into());
+            }
+        }
         if ep >= 0 {
             let target = ep as u8;
             let required_rank = if side == WHITE { 5 } else { 2 };
             let captured_sq = (target as i16 - side as i16 * 8) as usize;
+            let origin_sq = (target as i16 + side as i16 * 8) as usize;
             if rank(target) != required_rank
                 || board[target as usize] != EMPTY
                 || board[captured_sq] != -side * PAWN
+                || board[origin_sq] != EMPTY
+                || halfmove != 0
             {
                 return Err("invalid en passant state".into());
             }
@@ -442,61 +455,7 @@ impl Position {
 
     #[inline(always)]
     fn is_attacked(&self, target: u8, by: i8) -> bool {
-        let tf = file(target);
-        let tr = rank(target);
-        let pawn_rank = tr - by;
-        for df in [-1, 1] {
-            if let Some(sq) = square(tf + df, pawn_rank) {
-                if self.board[sq as usize] == by * PAWN {
-                    return true;
-                }
-            }
-        }
-        for &(df, dr) in &KNIGHT_DELTAS {
-            if let Some(sq) = square(tf + df, tr + dr) {
-                if self.board[sq as usize] == by * KNIGHT {
-                    return true;
-                }
-            }
-        }
-        for &(df, dr) in &KING_DELTAS {
-            if let Some(sq) = square(tf + df, tr + dr) {
-                if self.board[sq as usize] == by * KING {
-                    return true;
-                }
-            }
-        }
-        for &(df, dr) in &BISHOP_DIRS {
-            let mut f = tf + df;
-            let mut r = tr + dr;
-            while let Some(sq) = square(f, r) {
-                let p = self.board[sq as usize];
-                if p != EMPTY {
-                    if p == by * BISHOP || p == by * QUEEN {
-                        return true;
-                    }
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
-        }
-        for &(df, dr) in &ROOK_DIRS {
-            let mut f = tf + df;
-            let mut r = tr + dr;
-            while let Some(sq) = square(f, r) {
-                let p = self.board[sq as usize];
-                if p != EMPTY {
-                    if p == by * ROOK || p == by * QUEEN {
-                        return true;
-                    }
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
-        }
-        false
+        is_attacked_on(&self.board, target, by)
     }
 
     #[inline(always)]
@@ -658,10 +617,70 @@ impl Position {
     }
 }
 
+#[inline(always)]
+fn is_attacked_on(board: &[i8; 64], target: u8, by: i8) -> bool {
+    let tf = file(target);
+    let tr = rank(target);
+    let pawn_rank = tr - by;
+    for df in [-1, 1] {
+        if let Some(sq) = square(tf + df, pawn_rank) {
+            if board[sq as usize] == by * PAWN {
+                return true;
+            }
+        }
+    }
+    for &(df, dr) in &KNIGHT_DELTAS {
+        if let Some(sq) = square(tf + df, tr + dr) {
+            if board[sq as usize] == by * KNIGHT {
+                return true;
+            }
+        }
+    }
+    for &(df, dr) in &KING_DELTAS {
+        if let Some(sq) = square(tf + df, tr + dr) {
+            if board[sq as usize] == by * KING {
+                return true;
+            }
+        }
+    }
+    for &(df, dr) in &BISHOP_DIRS {
+        let mut f = tf + df;
+        let mut r = tr + dr;
+        while let Some(sq) = square(f, r) {
+            let p = board[sq as usize];
+            if p != EMPTY {
+                if p == by * BISHOP || p == by * QUEEN {
+                    return true;
+                }
+                break;
+            }
+            f += df;
+            r += dr;
+        }
+    }
+    for &(df, dr) in &ROOK_DIRS {
+        let mut f = tf + df;
+        let mut r = tr + dr;
+        while let Some(sq) = square(f, r) {
+            let p = board[sq as usize];
+            if p != EMPTY {
+                if p == by * ROOK || p == by * QUEEN {
+                    return true;
+                }
+                break;
+            }
+            f += df;
+            r += dr;
+        }
+    }
+    false
+}
+
 #[derive(Clone)]
 struct MoveList {
     moves: [u32; MAX_MOVES],
     scores: [i32; MAX_MOVES],
+    see_scores: [i16; MAX_MOVES],
     len: usize,
 }
 impl MoveList {
@@ -670,6 +689,7 @@ impl MoveList {
         Self {
             moves: [0; MAX_MOVES],
             scores: [0; MAX_MOVES],
+            see_scores: [0; MAX_MOVES],
             len: 0,
         }
     }
@@ -688,6 +708,7 @@ impl MoveList {
         }
         self.moves.swap(index, best);
         self.scores.swap(index, best);
+        self.see_scores.swap(index, best);
         self.moves[index]
     }
 }
@@ -1009,33 +1030,57 @@ fn move_to_uci(mv: u32) -> String {
 }
 
 fn parse_uci_move(pos: &mut Position, text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    if !text.is_ascii() || !matches!(bytes.len(), 4 | 5) {
+        return None;
+    }
+    let from = parse_square(&text[..2])?;
+    let to = parse_square(&text[2..4])?;
+    let promotion = if bytes.len() == 5 {
+        match bytes[4] {
+            b'q' => QUEEN,
+            b'r' => ROOK,
+            b'b' => BISHOP,
+            b'n' => KNIGHT,
+            _ => return None,
+        }
+    } else {
+        0
+    };
     let mut list = MoveList::new();
     generate_legal(pos, &mut list, false);
-    (0..list.len)
-        .map(|i| list.moves[i])
-        .find(|&mv| move_to_uci(mv) == text)
+    (0..list.len).map(|i| list.moves[i]).find(|&mv| {
+        move_from(mv) == from
+            && move_to(mv) == to
+            && if mv & FLAG_PROMO != 0 {
+                promotion == move_promo(mv)
+            } else {
+                promotion == 0
+            }
+    })
 }
+
+const OPENING_BOOK: [(&str, &str); 13] = [
+    ("", "e2e4"),
+    ("e2e4", "c7c5"),
+    ("e2e4 c7c5", "g1f3"),
+    ("e2e4 c7c5 g1f3", "d7d6"),
+    ("e2e4 c7c5 g1f3 d7d6", "d2d4"),
+    ("e2e4 c7c5 g1f3 d7d6 d2d4", "c5d4"),
+    ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4", "f3d4"),
+    ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4", "g8f6"),
+    ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6", "b1c3"),
+    ("d2d4", "g8f6"),
+    ("d2d4 g8f6 c2c4", "e7e6"),
+    ("d2d4 g8f6 c2c4 e7e6 b1c3", "f8b4"),
+    ("g1f3", "d7d5"),
+];
 
 fn opening_move(pos: &mut Position) -> Option<u32> {
     if pos.fullmove > 5 {
         return None;
     }
-    const BOOK: [(&str, &str); 13] = [
-        ("", "e2e4"),
-        ("e2e4", "c7c5"),
-        ("e2e4 c7c5", "g1f3"),
-        ("e2e4 c7c5 g1f3", "d7d6"),
-        ("e2e4 c7c5 g1f3 d7d6", "d2d4"),
-        ("e2e4 c7c5 g1f3 d7d6 d2d4", "c5d4"),
-        ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4", "f3d4"),
-        ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4", "g8f6"),
-        ("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6", "b1c3"),
-        ("d2d4", "g8f6"),
-        ("d2d4 g8f6 c2c4", "e7e6"),
-        ("d2d4 g8f6 c2c4 e7e6 b1c3", "f8b4"),
-        ("g1f3", "d7d5"),
-    ];
-    for (line, choice) in BOOK {
+    for (line, choice) in OPENING_BOOK {
         let mut expected = Position::from_fen(START_FEN).ok()?;
         let mut valid = true;
         for text in line.split_whitespace() {
@@ -1178,6 +1223,7 @@ impl TransTable {
 #[derive(Clone, Copy)]
 struct NullUndo {
     ep: i8,
+    halfmove: u16,
     hash: u64,
 }
 impl Position {
@@ -1185,12 +1231,14 @@ impl Position {
     fn make_null(&mut self) -> NullUndo {
         let undo = NullUndo {
             ep: self.ep,
+            halfmove: self.halfmove,
             hash: self.hash,
         };
         if let Some(ep_file) = self.ep_hash_file() {
             self.hash ^= zobrist().ep[ep_file];
         }
         self.ep = -1;
+        self.halfmove = self.halfmove.saturating_add(1);
         self.side = -self.side;
         self.hash ^= zobrist().side;
         undo
@@ -1199,6 +1247,7 @@ impl Position {
     fn unmake_null(&mut self, undo: NullUndo) {
         self.side = -self.side;
         self.ep = undo.ep;
+        self.halfmove = undo.halfmove;
         self.hash = undo.hash;
     }
 }
@@ -1411,10 +1460,7 @@ fn insufficient_material(pos: &Position) -> bool {
     }
     let total_knights = knights[0] + knights[1];
     let total_bishops = bishops[0] + bishops[1];
-    total_knights + total_bishops <= 1
-        || (total_knights == 0 && bishop_color != Some(2))
-        || (total_bishops == 0
-            && ((knights[0] == 2 && knights[1] == 0) || (knights[1] == 2 && knights[0] == 0)))
+    total_knights + total_bishops <= 1 || (total_knights == 0 && bishop_color != Some(2))
 }
 
 #[inline]
@@ -1424,56 +1470,76 @@ fn has_non_pawn_material(pos: &Position, side: i8) -> bool {
         .any(|&piece| color(piece) == side && matches!(kind(piece), KNIGHT | BISHOP | ROOK | QUEEN))
 }
 
-fn least_attacker(board: &[i8; 64], target: u8, side: i8) -> Option<(u8, i8)> {
-    let tf = file(target);
-    let tr = rank(target);
-    let pawn_r = tr - side;
-    for df in [-1, 1] {
-        if let Some(sq) = square(tf + df, pawn_r) {
-            if board[sq as usize] == side * PAWN {
-                return Some((sq, PAWN));
-            }
-        }
+fn piece_attacks_square(board: &[i8; 64], from: u8, target: u8, piece: i8) -> bool {
+    let df = file(target) - file(from);
+    let dr = rank(target) - rank(from);
+    let attacks = match kind(piece) {
+        PAWN => dr == color(piece) && df.abs() == 1,
+        KNIGHT => matches!((df.abs(), dr.abs()), (1, 2) | (2, 1)),
+        BISHOP => df.abs() == dr.abs(),
+        ROOK => df == 0 || dr == 0,
+        QUEEN => df == 0 || dr == 0 || df.abs() == dr.abs(),
+        KING => df.abs().max(dr.abs()) == 1,
+        _ => false,
+    };
+    if !attacks || !matches!(kind(piece), BISHOP | ROOK | QUEEN) {
+        return attacks;
     }
-    for &(df, dr) in &KNIGHT_DELTAS {
-        if let Some(sq) = square(tf + df, tr + dr) {
-            if board[sq as usize] == side * KNIGHT {
-                return Some((sq, KNIGHT));
-            }
+    let step_file = df.signum();
+    let step_rank = dr.signum();
+    let mut f = file(from) + step_file;
+    let mut r = rank(from) + step_rank;
+    while let Some(sq) = square(f, r) {
+        if sq == target {
+            return true;
         }
+        if board[sq as usize] != EMPTY {
+            return false;
+        }
+        f += step_file;
+        r += step_rank;
     }
-    for attacker in [BISHOP, ROOK, QUEEN] {
-        let dirs: &[(i8, i8)] = if attacker == BISHOP {
-            &BISHOP_DIRS
-        } else if attacker == ROOK {
-            &ROOK_DIRS
+    false
+}
+
+fn least_legal_attacker(
+    board: &[i8; 64],
+    target: u8,
+    side: i8,
+    king_sq: [u8; 2],
+) -> Option<(u8, i8)> {
+    let side_index = if side == WHITE { 0 } else { 1 };
+    let mut best = None;
+    let mut best_value = i32::MAX;
+    for sq in 0..64u8 {
+        let piece = board[sq as usize];
+        if color(piece) != side || !piece_attacks_square(board, sq, target, piece) {
+            continue;
+        }
+        let attacker = kind(piece);
+        let value = PIECE_VALUE[attacker as usize];
+        if value >= best_value {
+            continue;
+        }
+        let placed = if attacker == PAWN && matches!(rank(target), 0 | 7) {
+            QUEEN
         } else {
-            &KING_DELTAS
+            attacker
         };
-        for &(df, dr) in dirs {
-            let mut f = tf + df;
-            let mut r = tr + dr;
-            while let Some(sq) = square(f, r) {
-                let p = board[sq as usize];
-                if p != 0 {
-                    if p == side * attacker {
-                        return Some((sq, attacker));
-                    }
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
+        let mut test = *board;
+        test[sq as usize] = EMPTY;
+        test[target as usize] = side * placed;
+        let king = if attacker == KING {
+            target
+        } else {
+            king_sq[side_index]
+        };
+        if !is_attacked_on(&test, king, -side) {
+            best = Some((sq, attacker));
+            best_value = value;
         }
     }
-    for &(df, dr) in &KING_DELTAS {
-        if let Some(sq) = square(tf + df, tr + dr) {
-            if board[sq as usize] == side * KING {
-                return Some((sq, KING));
-            }
-        }
-    }
-    None
+    best
 }
 
 fn see(pos: &Position, mv: u32) -> i32 {
@@ -1498,6 +1564,10 @@ fn see(pos: &Position, mv: u32) -> i32 {
         kind(pos.board[from as usize])
     };
     board[to as usize] = pos.side * placed;
+    let mut king_sq = pos.king_sq;
+    if placed == KING {
+        king_sq[if pos.side == WHITE { 0 } else { 1 }] = to;
+    }
     let mut gain = [0i32; 32];
     gain[0] = PIECE_VALUE[captured as usize]
         + if mv & FLAG_PROMO != 0 {
@@ -1509,14 +1579,25 @@ fn see(pos: &Position, mv: u32) -> i32 {
     let mut victim = placed;
     let mut depth = 0usize;
     while depth < 30 {
-        let Some((sq, attacker)) = least_attacker(&board, to, side) else {
+        let Some((sq, attacker)) = least_legal_attacker(&board, to, side, king_sq) else {
             break;
         };
         depth += 1;
-        gain[depth] = PIECE_VALUE[victim as usize] - gain[depth - 1];
+        let promotes = attacker == PAWN && matches!(rank(to), 0 | 7);
+        gain[depth] = PIECE_VALUE[victim as usize] - gain[depth - 1]
+            + if promotes {
+                PIECE_VALUE[QUEEN as usize] - PIECE_VALUE[PAWN as usize]
+            } else {
+                0
+            };
         board[sq as usize] = 0;
-        board[to as usize] = side * attacker;
-        victim = attacker;
+        let placed_attacker = if promotes { QUEEN } else { attacker };
+        board[to as usize] = side * placed_attacker;
+        let side_index = if side == WHITE { 0 } else { 1 };
+        if attacker == KING {
+            king_sq[side_index] = to;
+        }
+        victim = placed_attacker;
         side = -side;
         if attacker == KING {
             break;
@@ -1547,6 +1628,7 @@ struct Searcher {
     counter: [u32; 4096],
     hashes: [u64; 512],
     hash_len: usize,
+    null_depth: u8,
 }
 
 impl Searcher {
@@ -1569,24 +1651,33 @@ impl Searcher {
             counter: [0; 4096],
             hashes: [0; 512],
             hash_len: 0,
+            null_depth: 0,
         }
     }
     #[inline(always)]
     fn time_check(&mut self) {
-        if self.nodes & 511 == 0 {
-            if self.stop.load(Ordering::Relaxed)
-                || self.node_limit.is_some_and(|limit| self.nodes >= limit)
-                || self
-                    .hard_limit
-                    .is_some_and(|limit| self.started.elapsed() >= limit)
-            {
-                self.stopped = true;
-            }
+        if self.node_limit.is_some_and(|limit| self.nodes >= limit) {
+            self.stopped = true;
+            return;
+        }
+        if self.nodes & 63 == 0 {
+            self.poll_limits();
+        }
+    }
+    #[inline(always)]
+    fn poll_limits(&mut self) {
+        if self.stop.load(Ordering::Relaxed)
+            || self.node_limit.is_some_and(|limit| self.nodes >= limit)
+            || self
+                .hard_limit
+                .is_some_and(|limit| self.started.elapsed() >= limit)
+        {
+            self.stopped = true;
         }
     }
     #[inline(always)]
     fn repetition(&self, pos: &Position) -> bool {
-        if self.hash_len < 3 {
+        if self.null_depth > 0 || self.hash_len < 3 {
             return false;
         }
         let start = (self.hash_len - 1).saturating_sub(pos.halfmove as usize);
@@ -1629,6 +1720,7 @@ impl Searcher {
     ) {
         for i in 0..list.len {
             let mv = list.moves[i];
+            list.see_scores[i] = 0;
             list.scores[i] = if mv == tt_move {
                 2_000_000
             } else if mv & FLAG_PROMO != 0 {
@@ -1640,9 +1732,10 @@ impl Searcher {
                     kind(pos.board[move_to(mv) as usize])
                 };
                 let exchange = see(pos, mv);
+                list.see_scores[i] = exchange.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 let base = if exchange >= 0 { 1_000_000 } else { 820_000 };
                 base + exchange * 32 + PIECE_VALUE[victim as usize]
-                    - kind(pos.board[move_from(mv) as usize]) as i32
+                    - PIECE_VALUE[kind(pos.board[move_from(mv) as usize]) as usize] / 16
             } else if ply < MAX_PLY && mv == self.killers[ply][0] {
                 900_000
             } else if ply < MAX_PLY && mv == self.killers[ply][1] {
@@ -1674,7 +1767,7 @@ impl Searcher {
             }
             return 0;
         }
-        if self.repetition(pos) || (pos.phase <= 2 && insufficient_material(pos)) {
+        if self.repetition(pos) || insufficient_material(pos) {
             return 0;
         }
         if ply >= MAX_PLY - 1 {
@@ -1713,7 +1806,7 @@ impl Searcher {
                 if stand + PIECE_VALUE[victim as usize] + 180 < alpha && mv & FLAG_PROMO == 0 {
                     delta_prune = true;
                 }
-                bad_exchange = see(pos, mv) < -120;
+                bad_exchange = list.see_scores[i] < -300;
             }
             let undo = pos.make_move(mv);
             let gives_check = pos.in_check(pos.side);
@@ -1766,7 +1859,7 @@ impl Searcher {
             }
             return 0;
         }
-        if (ply > 0 && self.repetition(pos)) || (pos.phase <= 2 && insufficient_material(pos)) {
+        if (ply > 0 && self.repetition(pos)) || insufficient_material(pos) {
             return 0;
         }
         if ply >= MAX_PLY - 1 {
@@ -1809,12 +1902,12 @@ impl Searcher {
             && !in_check
             && depth >= 3
             && static_eval >= beta
+            && pos.halfmove < 99
             && has_non_pawn_material(pos, pos.side)
         {
             let undo = pos.make_null();
             let old_hash_len = self.hash_len;
-            self.hash_len = 0;
-            self.push_hash(pos.hash);
+            self.null_depth += 1;
             let reduction = 2 + depth / 5;
             let score = -self.negamax(
                 pos,
@@ -1827,6 +1920,7 @@ impl Searcher {
                 0,
             );
             self.hash_len = old_hash_len;
+            self.null_depth -= 1;
             pos.unmake_null(undo);
             if self.stopped {
                 return 0;
@@ -1960,6 +2054,10 @@ impl Searcher {
         let mut best = -INF;
         let mut best_move = list.moves[0];
         for i in 0..list.len {
+            self.poll_limits();
+            if self.stopped {
+                break;
+            }
             let mv = list.pick(i);
             let undo = pos.make_move(mv);
             self.push_hash(pos.hash);
@@ -2008,6 +2106,7 @@ impl Searcher {
         self.qnodes = 0;
         self.seldepth = 0;
         self.stopped = false;
+        self.null_depth = 0;
         self.tt.age = self.tt.age.wrapping_add(1);
         self.soft_limit = limits.soft;
         self.hard_limit = limits.hard;
@@ -2426,15 +2525,16 @@ fn run_bench(depth: i32) -> Result<(), String> {
 fn run_selfplay(depth: i32, max_plies: usize) -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
     let mut searcher = Searcher::new(32, stop);
+    searcher.silent = true;
     let mut pos = Position::from_fen(START_FEN)?;
     let mut history = vec![pos.hash];
     let mut played = Vec::new();
     for _ in 0..max_plies {
-        let mut legal = MoveList::new();
-        generate_legal(&mut pos, &mut legal, false);
-        if legal.len == 0 || pos.halfmove >= 100 {
+        if web_game_over(&mut pos, &history) {
             break;
         }
+        let mut legal = MoveList::new();
+        generate_legal(&mut pos, &mut legal, false);
         let mv = searcher.search(
             &mut pos,
             GoLimits {
@@ -2470,6 +2570,9 @@ fn web_position(serialized_moves: &str) -> Result<(Position, Vec<u64>), String> 
     let mut history = vec![pos.hash];
     if serialized_moves != "-" && !serialized_moves.is_empty() {
         for text in serialized_moves.split(',') {
+            if web_game_over(&mut pos, &history) {
+                return Err(format!("move after game over in history: {text}"));
+            }
             let mv = parse_uci_move(&mut pos, text)
                 .ok_or_else(|| format!("illegal move in history: {text}"))?;
             pos.make_move(mv);
@@ -2481,6 +2584,13 @@ fn web_position(serialized_moves: &str) -> Result<(Position, Vec<u64>), String> 
 
 fn web_threefold(history: &[u64], current: u64) -> bool {
     history.iter().filter(|&&hash| hash == current).count() >= 3
+}
+
+fn web_game_over(pos: &mut Position, history: &[u64]) -> bool {
+    if pos.halfmove >= 100 || insufficient_material(pos) || web_threefold(history, pos.hash) {
+        return true;
+    }
+    !has_legal_move(pos)
 }
 
 fn web_snapshot(pos: &mut Position, history: &[u64], engine_move: Option<u32>) -> String {
@@ -2535,6 +2645,9 @@ fn run_web(args: &[String]) -> Result<(), String> {
         match action {
             "state" => Ok(web_snapshot(&mut pos, &history, None)),
             "play" => {
+                if web_game_over(&mut pos, &history) {
+                    return Err("game is already over".into());
+                }
                 let text = args.get(2).ok_or("missing player move")?;
                 let mv = parse_uci_move(&mut pos, text).ok_or("illegal player move")?;
                 pos.make_move(mv);
@@ -2544,11 +2657,7 @@ fn run_web(args: &[String]) -> Result<(), String> {
             "engine" => {
                 let mut legal = MoveList::new();
                 generate_legal(&mut pos, &mut legal, false);
-                if legal.len == 0
-                    || pos.halfmove >= 100
-                    || insufficient_material(&pos)
-                    || web_threefold(&history, pos.hash)
-                {
+                if legal.len == 0 || web_game_over(&mut pos, &history) {
                     return Ok(web_snapshot(&mut pos, &history, None));
                 }
                 let think_ms = args
@@ -2557,7 +2666,7 @@ fn run_web(args: &[String]) -> Result<(), String> {
                     .unwrap_or(650)
                     .clamp(25, 5_000);
                 let stop = Arc::new(AtomicBool::new(false));
-                let mut searcher = Searcher::new(32, stop);
+                let mut searcher = Searcher::new(16, stop);
                 searcher.silent = true;
                 let hard_ms = think_ms.saturating_sub(4).max(1);
                 let best = searcher.search(
@@ -2747,6 +2856,399 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legal_uci(pos: &mut Position) -> Vec<String> {
+        let mut list = MoveList::new();
+        generate_legal(pos, &mut list, false);
+        (0..list.len)
+            .map(|index| move_to_uci(list.moves[index]))
+            .collect()
+    }
+
+    fn play(pos: &mut Position, text: &str) -> Undo {
+        let mv = parse_uci_move(pos, text).unwrap_or_else(|| panic!("expected legal move {text}"));
+        pos.make_move(mv)
+    }
+
+    fn play_line(pos: &mut Position, moves: &[&str]) -> Vec<u64> {
+        let mut history = vec![pos.hash];
+        for text in moves {
+            play(pos, text);
+            history.push(pos.hash);
+        }
+        history
+    }
+
+    #[test]
+    fn basic_pawn_rules_and_turn_switching() {
+        let mut pos = Position::from_fen(START_FEN).unwrap();
+        let legal = legal_uci(&mut pos);
+        assert_eq!(legal.len(), 20);
+        for expected in ["a2a3", "a2a4", "e2e3", "e2e4"] {
+            assert!(legal.contains(&expected.to_string()));
+        }
+        for illegal in ["a2a5", "e2e1", "e2f3", "e7e5", "e2e4q", "€a"] {
+            assert!(parse_uci_move(&mut pos, illegal).is_none(), "{illegal}");
+        }
+        play(&mut pos, "e2e4");
+        assert_eq!(pos.side, BLACK);
+        assert_eq!(pos.ep, parse_square("e3").unwrap() as i8);
+        assert_eq!(pos.halfmove, 0);
+        assert_eq!(pos.fullmove, 1);
+        play(&mut pos, "c7c5");
+        assert_eq!(pos.side, WHITE);
+        assert_eq!(pos.fullmove, 2);
+    }
+
+    #[test]
+    fn piece_movement_and_sliding_obstruction() {
+        let mut start = Position::from_fen(START_FEN).unwrap();
+        let legal = legal_uci(&mut start);
+        assert!(legal.contains(&"b1a3".into()) && legal.contains(&"g1f3".into()));
+        assert!(!legal.iter().any(|mv| mv.starts_with("c1")));
+        assert!(!legal.iter().any(|mv| mv.starts_with("a1")));
+        assert!(!legal.iter().any(|mv| mv.starts_with("d1")));
+
+        let mut sliders = Position::from_fen("4k3/8/8/3p4/3Q4/4P3/8/4K3 w - - 0 1").unwrap();
+        let legal = legal_uci(&mut sliders);
+        assert!(legal.contains(&"d4d5".into()));
+        assert!(!legal.contains(&"d4d6".into()));
+        assert!(!legal.contains(&"d4e3".into()));
+        assert!(legal.contains(&"d4a4".into()));
+        assert!(legal.contains(&"d4h4".into()));
+
+        let mut bishop = Position::from_fen("4k3/8/8/8/8/4P3/3B4/4K3 w - - 0 1").unwrap();
+        let legal = legal_uci(&mut bishop);
+        assert!(!legal.contains(&"d2e3".into()));
+        assert!(!legal.contains(&"d2f4".into()));
+
+        let mut rook = Position::from_fen("4k3/8/8/8/8/8/P7/R3K3 w - - 0 1").unwrap();
+        let legal = legal_uci(&mut rook);
+        assert!(!legal.contains(&"a1a2".into()));
+        assert!(!legal.contains(&"a1a8".into()));
+    }
+
+    #[test]
+    fn pins_checks_and_king_safety_are_enforced() {
+        let mut pinned = Position::from_fen("4r1k1/8/8/8/8/8/4N3/4K3 w - - 0 1").unwrap();
+        assert!(pinned.in_check(WHITE) == false);
+        assert!(!legal_uci(&mut pinned).iter().any(|mv| mv.starts_with("e2")));
+
+        let mut checked = Position::from_fen("4r1k1/8/8/8/8/8/4r3/4K3 w - - 0 1").unwrap();
+        assert!(checked.in_check(WHITE));
+        assert!(parse_uci_move(&mut checked, "e1e2").is_none());
+
+        let mut king = Position::from_fen("3r2k1/8/8/8/8/8/3r4/4K3 w - - 0 1").unwrap();
+        assert!(parse_uci_move(&mut king, "e1d2").is_none());
+
+        let mut safe_king = Position::from_fen("7k/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(parse_uci_move(&mut safe_king, "e1d1").is_some());
+        assert!(parse_uci_move(&mut safe_king, "e1e2").is_some());
+    }
+
+    #[test]
+    fn checkmate_stalemate_and_normal_play_are_distinct() {
+        let mut mate = Position::from_fen(START_FEN).unwrap();
+        let history = play_line(&mut mate, &["f2f3", "e7e5", "g2g4", "d8h4"]);
+        assert!(mate.in_check(WHITE));
+        assert!(!has_legal_move(&mut mate));
+        assert!(web_snapshot(&mut mate, &history, None).contains("\"status\":\"checkmate\""));
+
+        let mut stale = Position::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").unwrap();
+        let hash = stale.hash;
+        assert!(!stale.in_check(BLACK));
+        assert!(!has_legal_move(&mut stale));
+        assert!(web_snapshot(&mut stale, &[hash], None).contains("\"status\":\"stalemate\""));
+
+        let mut normal = Position::from_fen(START_FEN).unwrap();
+        let hash = normal.hash;
+        assert!(web_snapshot(&mut normal, &[hash], None).contains("\"status\":\"playing\""));
+    }
+
+    #[test]
+    fn castling_and_rights_transitions_are_correct() {
+        let fen = "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1";
+        let mut pos = Position::from_fen(fen).unwrap();
+        let legal = legal_uci(&mut pos);
+        assert!(legal.contains(&"e1g1".into()));
+        assert!(legal.contains(&"e1c1".into()));
+        play(&mut pos, "e1g1");
+        assert_eq!(pos.board[parse_square("g1").unwrap() as usize], KING);
+        assert_eq!(pos.board[parse_square("f1").unwrap() as usize], ROOK);
+        assert_eq!(pos.castle & 3, 0);
+
+        let mut black = Position::from_fen("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1").unwrap();
+        assert!(legal_uci(&mut black).contains(&"e8c8".into()));
+        play(&mut black, "e8c8");
+        assert_eq!(black.board[parse_square("c8").unwrap() as usize], -KING);
+        assert_eq!(black.board[parse_square("d8").unwrap() as usize], -ROOK);
+
+        let mut through_check = Position::from_fen("4k3/8/8/8/2b5/8/8/4K2R w K - 0 1").unwrap();
+        assert!(!legal_uci(&mut through_check).contains(&"e1g1".into()));
+
+        let mut king_moved = Position::from_fen(fen).unwrap();
+        play(&mut king_moved, "e1f1");
+        assert_eq!(king_moved.castle & 3, 0);
+
+        let mut rook_moved = Position::from_fen(fen).unwrap();
+        play(&mut rook_moved, "h1h2");
+        assert_eq!(rook_moved.castle & 1, 0);
+        assert_ne!(rook_moved.castle & 2, 0);
+
+        let mut rook_captured = Position::from_fen("4k3/8/8/8/8/8/q7/R3K3 b Q - 0 1").unwrap();
+        play(&mut rook_captured, "a2a1");
+        assert_eq!(rook_captured.castle & 2, 0);
+    }
+
+    #[test]
+    fn en_passant_creation_capture_expiry_and_king_safety() {
+        let mut pos = Position::from_fen(START_FEN).unwrap();
+        play_line(&mut pos, &["e2e4", "a7a6", "e4e5", "d7d5"]);
+        assert!(legal_uci(&mut pos).contains(&"e5d6".into()));
+        let undo = play(&mut pos, "e5d6");
+        assert_eq!(undo.captured, -PAWN);
+        assert_eq!(pos.board[parse_square("d6").unwrap() as usize], PAWN);
+        assert_eq!(pos.board[parse_square("d5").unwrap() as usize], EMPTY);
+
+        let mut expires = Position::from_fen(START_FEN).unwrap();
+        play_line(
+            &mut expires,
+            &["e2e4", "a7a6", "e4e5", "d7d5", "a2a3", "a6a5"],
+        );
+        assert!(!legal_uci(&mut expires).contains(&"e5d6".into()));
+
+        let mut pinned = Position::from_fen("4r1k1/8/8/3pP3/8/8/8/4K3 w - d6 0 1").unwrap();
+        assert!(!legal_uci(&mut pinned).contains(&"e5d6".into()));
+    }
+
+    #[test]
+    fn promotion_replaces_pawn_and_capture_state_is_reversible() {
+        let mut promotion = Position::from_fen("7k/1P6/8/8/8/8/8/7K w - - 0 1").unwrap();
+        let legal = legal_uci(&mut promotion);
+        for suffix in ['q', 'r', 'b', 'n'] {
+            assert!(legal.contains(&format!("b7b8{suffix}")));
+        }
+        play(&mut promotion, "b7b8n");
+        assert_eq!(
+            promotion.board[parse_square("b8").unwrap() as usize],
+            KNIGHT
+        );
+        assert_eq!(promotion.board[parse_square("b7").unwrap() as usize], EMPTY);
+
+        let mut capture = Position::from_fen("4k3/8/8/8/8/8/4p3/4R1K1 w - - 0 1").unwrap();
+        let before = capture.clone();
+        let mv = parse_uci_move(&mut capture, "e1e2").unwrap();
+        let undo = capture.make_move(mv);
+        assert_eq!(undo.captured, -PAWN);
+        assert_eq!(capture.board[parse_square("e2").unwrap() as usize], ROOK);
+        assert_eq!(capture.board[parse_square("e1").unwrap() as usize], EMPTY);
+        capture.unmake_move(mv, undo);
+        assert_eq!(capture, before);
+    }
+
+    #[test]
+    fn fen_rejects_impossible_rule_state() {
+        assert!(Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - -").is_err());
+        assert!(Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1 extra").is_err());
+        assert!(Position::from_fen("4k3/8/8/8/8/8/7R/4K3 w K - 0 1").is_err());
+        assert!(Position::from_fen("4k3/4n3/8/4pP2/8/8/8/4K3 w - e6 0 1").is_err());
+        assert!(Position::from_fen("4k3/8/8/4pP2/8/8/8/4K3 w - e6 1 1").is_err());
+    }
+
+    #[test]
+    fn two_knights_are_not_automatically_dead_material() {
+        let live = Position::from_fen("7k/8/5NN1/8/8/8/8/5K2 w - - 0 1").unwrap();
+        assert!(!insufficient_material(&live));
+        let mut mate = Position::from_fen("7k/5K2/5NN1/8/8/8/8/8 b - - 0 1").unwrap();
+        assert!(mate.in_check(BLACK));
+        assert!(!has_legal_move(&mut mate));
+    }
+
+    #[test]
+    fn web_history_rejects_moves_after_terminal_positions() {
+        let repeated = "g1f3,g8f6,f3g1,f6g8,g1f3,g8f6,f3g1,f6g8";
+        let (mut pos, history) = web_position(repeated).unwrap();
+        assert!(web_snapshot(&mut pos, &history, None).contains("\"status\":\"draw\""));
+        assert!(web_position(&format!("{repeated},e2e4")).is_err());
+    }
+
+    #[test]
+    fn null_move_and_search_restore_state_and_history() {
+        let mut pos = Position::from_fen("4k3/8/8/8/8/8/4Q3/4K3 w - - 37 1").unwrap();
+        let before = pos.clone();
+        let undo = pos.make_null();
+        assert_eq!(pos.side, BLACK);
+        assert_eq!(pos.halfmove, 38);
+        assert_eq!(pos.ep, -1);
+        pos.unmake_null(undo);
+        assert_eq!(pos, before);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut searcher = Searcher::new(1, stop);
+        searcher.own_book = false;
+        let history = [11, 22, 33, 44, before.hash];
+        let best = searcher.search(
+            &mut pos,
+            GoLimits {
+                depth: 5,
+                soft: None,
+                hard: None,
+                nodes: None,
+            },
+            &history,
+        );
+        assert_ne!(best, 0);
+        assert_eq!(&searcher.hashes[..history.len()], &history);
+        assert_eq!(searcher.null_depth, 0);
+        assert_eq!(pos, before);
+    }
+
+    #[test]
+    fn every_opening_book_entry_is_legal() {
+        for (line, choice) in OPENING_BOOK {
+            let mut pos = Position::from_fen(START_FEN).unwrap();
+            for text in line.split_whitespace() {
+                play(&mut pos, text);
+            }
+            let expected = parse_uci_move(&mut pos, choice)
+                .unwrap_or_else(|| panic!("invalid book move {choice} after {line}"));
+            assert_eq!(opening_move(&mut pos), Some(expected));
+        }
+    }
+
+    #[test]
+    fn bounded_search_returns_a_legal_move() {
+        let mut pos = Position::from_fen(
+            "r1bqk2r/pppp1ppp/2n2n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 4 4",
+        )
+        .unwrap();
+        let hash = pos.hash;
+        let mut legal = MoveList::new();
+        generate_legal(&mut pos, &mut legal, false);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut searcher = Searcher::new(1, stop);
+        searcher.own_book = false;
+        let best = searcher.search(
+            &mut pos,
+            GoLimits {
+                depth: 16,
+                soft: None,
+                hard: None,
+                nodes: Some(1),
+            },
+            &[hash],
+        );
+        assert!(searcher.nodes <= 1);
+        assert!((0..legal.len).any(|index| legal.moves[index] == best));
+    }
+
+    #[test]
+    fn tactical_search_finds_forcing_moves() {
+        let cases = [
+            ("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1", 3, "f7g7"),
+            ("6k1/5ppp/8/8/8/8/5PPP/3Q2K1 w - - 0 1", 4, "d1d8"),
+            ("4k3/8/3q4/8/2N5/8/8/4K3 w - - 0 1", 5, "c4d6"),
+        ];
+        for (fen, depth, expected) in cases {
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut searcher = Searcher::new(4, stop);
+            searcher.own_book = false;
+            let mut pos = Position::from_fen(fen).unwrap();
+            let hash = pos.hash;
+            let best = searcher.search(
+                &mut pos,
+                GoLimits {
+                    depth,
+                    soft: None,
+                    hard: None,
+                    nodes: None,
+                },
+                &[hash],
+            );
+            assert_eq!(move_to_uci(best), expected, "{fen}");
+        }
+    }
+
+    #[test]
+    fn legal_see_ignores_pinned_and_illegal_king_recaptures() {
+        let mut pinned = Position::from_fen("4k3/3pr3/8/8/8/8/8/3QR1K1 w - - 0 1").unwrap();
+        let capture = parse_uci_move(&mut pinned, "d1d7").unwrap();
+        assert!(see(&pinned, capture) < 0);
+
+        let mut king = Position::from_fen("7k/6r1/8/8/8/2B5/6Q1/K7 w - - 0 1").unwrap();
+        let capture = parse_uci_move(&mut king, "g2g7").unwrap();
+        assert!(see(&king, capture) >= PIECE_VALUE[ROOK as usize]);
+
+        let mut recapture_promotion =
+            Position::from_fen("r1b4k/1P6/8/8/8/7Q/8/7K w - - 0 1").unwrap();
+        let capture = parse_uci_move(&mut recapture_promotion, "h3c8").unwrap();
+        assert!(see(&recapture_promotion, capture) > 0);
+    }
+
+    #[test]
+    fn selective_search_regression_positions() {
+        let cases = [
+            (
+                "rnbbk2r/pp1p2pp/2p1p2n/5Q1R/8/3P2P1/PPP1PP2/RNBK1BN1 w kq - 1 9",
+                4,
+                "f5h3",
+            ),
+            (
+                "r1bk2nr/p1p2p2/1p2p1n1/3p2p1/2PP4/N2BP2P/P4PP1/2RK2R1 w - - 1 18",
+                4,
+                "c4d5",
+            ),
+            (
+                "1nb1kb2/1p1p1pp1/1q2pn2/7r/rp3P2/3P2PN/PB2P2P/RN1QK2R b KQ - 1 13",
+                4,
+                "b4b3",
+            ),
+        ];
+        for (fen, depth, expected) in cases {
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut searcher = Searcher::new(4, stop);
+            searcher.own_book = false;
+            let mut pos = Position::from_fen(fen).unwrap();
+            let hash = pos.hash;
+            let best = searcher.search(
+                &mut pos,
+                GoLimits {
+                    depth,
+                    soft: None,
+                    hard: None,
+                    nodes: None,
+                },
+                &[hash],
+            );
+            assert_eq!(move_to_uci(best), expected, "{fen}");
+        }
+    }
+
+    #[test]
+    fn evaluation_and_time_controls_have_expected_direction() {
+        let white_to_move = Position::from_fen("4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1").unwrap();
+        let black_to_move = Position::from_fen("4k3/8/8/8/8/8/4Q3/4K3 b - - 0 1").unwrap();
+        assert!(evaluate(&white_to_move) > 800);
+        assert!(evaluate(&black_to_move) < -800);
+
+        let quick = parse_go("go movetime 250", WHITE);
+        let deep = parse_go("go movetime 2500", WHITE);
+        assert!(quick.soft < deep.soft);
+        assert!(quick.hard < deep.hard);
+        assert_eq!(quick.hard, Some(Duration::from_millis(247)));
+        assert_eq!(deep.hard, Some(Duration::from_millis(2497)));
+    }
+
+    #[test]
+    fn canonical_perft_regression() {
+        let mut start = Position::from_fen(START_FEN).unwrap();
+        assert_eq!(perft(&mut start, 4), 197_281);
+        let mut kiwipete = Position::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .unwrap();
+        assert_eq!(perft(&mut kiwipete, 3), 97_862);
+    }
 
     #[test]
     fn adversarial_move_generation() {

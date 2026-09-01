@@ -8,8 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "build:engine": "node scripts/build-engine.js",
-    "test:web": "node scripts/web-smoke.mjs",
-    "verify": "cargo test --release && npm run build:engine && npm run build"
+    "test:web": "npm run build && node scripts/web-smoke.mjs",
+    "verify": "cargo test --release && cargo run --release -- test && npm run build:engine && npm run test:web"
   },
   "dependencies": {
     "@bjorn3/browser_wasi_shim": "0.4.2"
